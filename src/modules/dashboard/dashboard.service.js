@@ -42,7 +42,6 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
   const monthDateFilter = isAllTime ? {} : { createdAt: { $gte: monthStart, $lte: end } };
 
   const [
-    todayVerifications, 
     monthVerifications, 
     pendingTasks, 
     targetDoc,
@@ -55,7 +54,7 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     onHoldCount,
     todayClosedLost
   ] = await Promise.all([
-    Verification.countDocuments({ ...filter, ...dateFilter }),
+    // monthVerifications = verifications created/in-queue this month (for reference)
     Verification.countDocuments({ ...filter, ...monthDateFilter }),
     Task.countDocuments({ ...filter, status: 'pending', isDeleted: false }),
     StaffTarget.findOne({ user: uid, date: dateStr }),
@@ -64,10 +63,14 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     Task.countDocuments({ ...filter, status: 'interested', isDeleted: false, ...updateDateFilter }),
     Task.countDocuments({ ...filter, status: 'cancel_call', isDeleted: false, ...updateDateFilter }),
     Lead.countDocuments({ ...filter, ...dateFilter }),
-    Verification.countDocuments({ ...filter, status: 'verified', ...updateDateFilter }),
+    // verifiedCount = verifications actually COMPLETED (status: verified or rejected) in the selected period
+    Verification.countDocuments({ ...filter, status: { $in: ['verified', 'rejected'] }, ...updateDateFilter }),
     Verification.countDocuments({ ...filter, status: 'on_hold', ...updateDateFilter }),
     Lead.countDocuments({ ...filter, status: 'closed_lost', ...updateDateFilter }),
   ]);
+
+  // todayVerifications = verifications assigned/created today (sent to verification)
+  const todayVerifications = await Verification.countDocuments({ ...filter, ...dateFilter });
 
   return {
     todayVerifications,
@@ -104,8 +107,7 @@ export const setStaffTarget = async (userId, target, date) => {
       const Verification = (await import('../verification/verification.model.js')).default;
       const completedCount = await Verification.countDocuments({
         assignedTo: userId,
-        status: 'verified',
-        updatedAt: { $gte: startOfDay, $lte: endOfDay }
+        createdAt: { $gte: startOfDay, $lte: endOfDay }
       });
       
       if (completedCount < doc.target) {
@@ -163,8 +165,12 @@ export const getTargetHistory = async (userId, month, year, days) => {
     }
   }
 
-  const [targets, verifications] = await Promise.all([
+  const [targets, verifications, actualVerified] = await Promise.all([
     StaffTarget.find({ user: uid, date: { $gte: startDateStr, $lte: endDateStr } }).lean(),
+    Verification.aggregate([
+      { $match: { assignedTo: uid, createdAt: { $gte: periodStart, $lte: periodEnd } } },
+      { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: '+05:30' } }, count: { $sum: 1 } } }
+    ]),
     Verification.aggregate([
       { $match: { assignedTo: uid, status: 'verified', updatedAt: { $gte: periodStart, $lte: periodEnd } } },
       { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$updatedAt', timezone: '+05:30' } }, count: { $sum: 1 } } }
@@ -175,6 +181,8 @@ export const getTargetHistory = async (userId, month, year, days) => {
   targets.forEach(t => { targetMap[t.date] = t.target; });
   const verifiedMap = {};
   verifications.forEach(v => { verifiedMap[v._id] = v.count; });
+  const actualVerifiedMap = {};
+  actualVerified.forEach(v => { actualVerifiedMap[v._id] = v.count; });
 
   return dateList.map(item => {
     const tgt = targetMap[item.dateStr] || 0;
@@ -183,6 +191,7 @@ export const getTargetHistory = async (userId, month, year, days) => {
       date: item.dateStr,
       target: tgt,
       completed: done,
+      verified: actualVerifiedMap[item.dateStr] || 0,
       achieved: tgt > 0 ? done >= tgt : false,
     };
   });
@@ -229,7 +238,7 @@ export const getStaffTodayLists = async (userRole, userId, targetDate, targetSta
     taskFilter.department = { $in: userDepartments };
   }
 
-  const [cnpList, callAgainList, interestedList, notInterestedList, onHoldList] = await Promise.all([
+  const [cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList] = await Promise.all([
     Cnp.find(updateFilter)
       .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
     CallAgain.find(updateFilter)
@@ -238,11 +247,13 @@ export const getStaffTodayLists = async (userRole, userId, targetDate, targetSta
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
     Task.find({ ...taskFilter, status: 'cancel_call' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
-    Verification.find({ ...filter, status: 'on_hold', ...(isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } }) })
+    Verification.find({ ...updateFilter, status: 'on_hold' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
+    Verification.find({ ...filter })
+      .populate('lead', 'name phone status').sort({ createdAt: -1 }).limit(100).lean(),
   ]);
 
-  return { cnpList, callAgainList, interestedList, notInterestedList, onHoldList };
+  return { cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList };
 };
 
 export const getStaffMonthlyChart = async (userId) => {
@@ -395,7 +406,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
       // VR: verifications this person completed today (they are set as assignedTo when they verify)
       Verification.countDocuments({ 
         assignedTo: uid,
-        status: 'verified',
+        status: { $in: ['verified', 'rejected'] },
         ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
       }),
       Verification.countDocuments({ 
