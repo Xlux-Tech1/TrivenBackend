@@ -4,6 +4,9 @@ import ApiResponse from '../../utils/ApiResponse.js';
 import Lead from '../lead/lead.model.js';
 import User from '../user/user.model.js';
 import * as leadService from '../lead/lead.service.js';
+import streamifier from 'streamifier';
+import cloudinary from '../../config/cloudinary.js';
+import { sendWhatsAppMessage, sendInteraktChatMessage } from './interakt.service.js';
 
 /**
  * Handle incoming webhooks from Interakt
@@ -98,23 +101,19 @@ const handleWebhook = catchAsync(async (req, res) => {
             name: customerName,
             phone: phone,
             source: 'social_media',
+            department: targetDepartment,
             problem: `[Interakt Message] ${messageText}`,
             status: 'new'
           };
           
-          if (targetDepartment) {
-              newLeadData.department = targetDepartment;
-          }
-          
-          lead = await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+          await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
         } else {
-            // If lead already exists, just add note
-            // If we now have a real name, optionally update the lead's name if it was generic
-            if (customerName && customerName !== `WhatsApp Lead (${phone})` && lead.name.startsWith('WhatsApp Lead')) {
-               lead.name = customerName;
-            }
-            lead.notes.push({ text: `[Interakt Message] ${messageText}`, createdBy: defaultAdmin ? defaultAdmin._id : null });
-            await lead.save();
+          console.log(`[Interakt Webhook] Adding note to existing lead ${lead._id}`);
+          lead.notes.push({
+            text: `[Interakt Message] ${messageText}`,
+            direction: 'inbound',
+          });
+          await lead.save();
         }
       }
     } else {
@@ -128,8 +127,95 @@ const handleWebhook = catchAsync(async (req, res) => {
   res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, null, 'Webhook received successfully'));
 });
 
+/**
+ * Send a WhatsApp message to a lead via Interakt
+ */
+const sendMessage = catchAsync(async (req, res) => {
+  const { leadId, message, templateName, languageCode, useStandardChat } = req.body;
+
+  if (!leadId) {
+    return res.status(httpStatus.BAD_REQUEST).json(new ApiResponse(httpStatus.BAD_REQUEST, null, 'leadId is required'));
+  }
+
+  const lead = await Lead.findById(leadId);
+  if (!lead) {
+    return res.status(httpStatus.NOT_FOUND).json(new ApiResponse(httpStatus.NOT_FOUND, null, 'Lead not found'));
+  }
+
+  let mediaUrl = null;
+
+  // Handle file upload if present
+  if (req.file) {
+    try {
+      const uploadResult = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'interakt-media',
+            resource_type: 'auto'
+          },
+          (error, result) => {
+            if (error) return reject(new Error('Cloudinary upload failed'));
+            resolve(result);
+          }
+        );
+        streamifier.createReadStream(req.file.buffer).pipe(uploadStream);
+      });
+      mediaUrl = uploadResult.secure_url;
+    } catch (error) {
+      console.error('[Cloudinary Error]', error);
+      return res.status(httpStatus.INTERNAL_SERVER_ERROR).json(new ApiResponse(httpStatus.INTERNAL_SERVER_ERROR, null, 'Failed to upload media'));
+    }
+  }
+
+  // Send WhatsApp via Interakt
+  let interaktResult = null;
+  try {
+    if (mediaUrl || useStandardChat === 'true' || useStandardChat === true) {
+      // Use standard chat message API for attachments
+      interaktResult = await sendInteraktChatMessage({
+        phone: lead.phone,
+        messageText: message || '',
+        mediaUrl: mediaUrl
+      });
+    } else {
+      // Use standard template API
+      if (!message) {
+        return res.status(httpStatus.BAD_REQUEST).json(new ApiResponse(httpStatus.BAD_REQUEST, null, 'message is required for templates'));
+      }
+      interaktResult = await sendWhatsAppMessage({
+        phone: lead.phone,
+        messageText: message,
+        templateName,
+        languageCode,
+      });
+    }
+  } catch (err) {
+    console.error('[Interakt] sendMessage failed:', err?.response?.data || err.message);
+    // Don't block — still save the note so staff have a record
+  }
+
+  // Save outbound note
+  const sentBy = req.user?._id || null;
+  
+  let noteText = message || '';
+  if (mediaUrl) {
+    noteText = `[Attached Media: ${mediaUrl}] ${noteText}`;
+  }
+
+  lead.notes.push({
+    text: noteText,
+    createdBy: sentBy,
+    direction: 'outbound',
+  });
+  await lead.save();
+
+  const savedNote = lead.notes[lead.notes.length - 1];
+  return res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, { note: savedNote, interaktResult }, 'Message sent'));
+});
+
 export default {
   handleWebhook,
+  sendMessage,
   testWebhook: catchAsync(async (req, res) => {
     let lead = await Lead.findOne({ phone: "8888888888" });
     const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }).select('_id').lean();

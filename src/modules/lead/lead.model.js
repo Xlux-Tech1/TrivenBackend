@@ -25,7 +25,7 @@ const leadSchema = new mongoose.Schema(
       default: 'new',
     },
     note: { type: String },
-    notes: [{ text: { type: String }, createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, createdAt: { type: Date, default: Date.now } }],
+    notes: [{ text: { type: String }, createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, createdAt: { type: Date, default: Date.now }, direction: { type: String, enum: ['inbound', 'outbound'], default: 'inbound' } }],
     problem: { type: String },
     type: {
       type: String,

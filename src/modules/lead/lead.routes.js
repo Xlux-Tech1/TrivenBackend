@@ -35,6 +35,7 @@ router.patch('/:leadId/assign', auth('admin', 'manager'), departmentFilter, vali
 router.patch('/:leadId/cnp', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.markCNP);
 router.patch('/:leadId/uncnp', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.unmarkCNP);
 router.post('/:leadId/notes', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.addNote);
+router.delete('/:leadId/notes/:noteId', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.deleteNote);
 router.post('/:leadId/follow-up', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.addFollowUp);
 router.patch('/:leadId/next-follow-up', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.setNextFollowUp);
 router.get('/export', auth('admin', 'manager'), departmentFilter, leadController.exportLeads);

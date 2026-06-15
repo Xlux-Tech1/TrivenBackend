@@ -170,3 +170,94 @@ export const sendRcsTemplate = async ({ countryCode = '+91', phoneNumber, templa
     console.error('Interakt Send RCS Template Error:', error?.response?.data || error.message);
   }
 };
+
+/**
+ * Send a WhatsApp message via Interakt template API
+ * @param {string} phone - 10-digit Indian phone number
+ * @param {string} messageText - The text to send (goes into template body variable {{1}})
+ * @param {string} templateName - Interakt pre-approved template name
+ * @param {string} languageCode - Template language code
+ */
+export const sendWhatsAppMessage = async ({ phone, messageText, templateName, languageCode = 'en' }) => {
+  if (!INTERAKT_API_KEY) throw new Error('INTERAKT_API_KEY not configured');
+  
+  let cleanPhone = phone.trim();
+  let countryCode = '91';
+  
+  if (cleanPhone.startsWith('+91')) cleanPhone = cleanPhone.substring(3);
+  else if (cleanPhone.startsWith('91') && cleanPhone.length === 12) cleanPhone = cleanPhone.substring(2);
+  else if (cleanPhone.startsWith('+')) {
+    // extract country code
+    const match = cleanPhone.match(/^\+(\d{1,3})(\d+)$/);
+    if (match) { countryCode = match[1]; cleanPhone = match[2]; }
+  }
+  cleanPhone = cleanPhone.slice(-10); // ensure 10 digits
+
+  const template = templateName || process.env.INTERAKT_WA_TEMPLATE || 'hello_world';
+
+  const payload = {
+    countryCode: `+${countryCode}`,
+    phoneNumber: cleanPhone,
+    callbackData: 'crm_outbound',
+    type: 'Template',
+    template: {
+      name: template,
+      languageCode,
+      bodyValues: [messageText],
+    },
+  };
+
+  const response = await axios.post('https://api.interakt.ai/v1/public/message/', payload, { headers: getHeaders() });
+  return response.data;
+};
+
+/**
+ * Send a standard WhatsApp chat message (requires active 24-hour window)
+ * @param {string} phone - 10-digit Indian phone number
+ * @param {string} messageText - The text to send
+ * @param {string} mediaUrl - Optional public URL of the media
+ */
+export const sendInteraktChatMessage = async ({ phone, messageText, mediaUrl }) => {
+  if (!INTERAKT_API_KEY) throw new Error('INTERAKT_API_KEY not configured');
+  
+  let cleanPhone = phone.trim();
+  let countryCode = '91';
+  
+  if (cleanPhone.startsWith('+91')) cleanPhone = cleanPhone.substring(3);
+  else if (cleanPhone.startsWith('91') && cleanPhone.length === 12) cleanPhone = cleanPhone.substring(2);
+  else if (cleanPhone.startsWith('+')) {
+    const match = cleanPhone.match(/^\+(\d{1,3})(\d+)$/);
+    if (match) { countryCode = match[1]; cleanPhone = match[2]; }
+  }
+  cleanPhone = cleanPhone.slice(-10);
+
+  const payload = {
+    countryCode: `+${countryCode}`,
+    phoneNumber: cleanPhone,
+    callbackData: 'crm_outbound',
+  };
+
+  if (mediaUrl) {
+    let type = 'Image';
+    if (mediaUrl.match(/\.(mp4|mov|avi)$/i)) type = 'Video';
+    else if (mediaUrl.match(/\.(pdf|doc|docx|txt|xls|xlsx)$/i)) type = 'Document';
+    else if (mediaUrl.includes('raw/upload') || mediaUrl.includes('/raw/')) type = 'Document';
+    else if (mediaUrl.includes('/video/')) type = 'Video';
+    
+    payload.type = type;
+    payload.data = {
+      mediaUrl: mediaUrl
+    };
+    if (messageText) {
+      payload.data.caption = messageText;
+    }
+  } else {
+    payload.type = 'Text';
+    payload.data = {
+      message: messageText
+    };
+  }
+
+  const response = await axios.post('https://api.interakt.ai/v1/public/message/', payload, { headers: getHeaders() });
+  return response.data;
+};
