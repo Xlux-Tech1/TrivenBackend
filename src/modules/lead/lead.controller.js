@@ -170,7 +170,7 @@ const deleteNote = catchAsync(async (req, res) => {
   
   const noteId = req.params.noteId;
   const initialLength = lead.notes.length;
-  lead.notes = lead.notes.filter(note => note._id.toString() !== noteId);
+  lead.notes.pull({ _id: noteId });
   
   if (lead.notes.length === initialLength) {
     throw new ApiError(httpStatus.NOT_FOUND, 'Note not found');
@@ -179,7 +179,8 @@ const deleteNote = catchAsync(async (req, res) => {
   await lead.save();
   await lead.populate('notes.createdBy', 'name');
 
-  interaktService.trackEvent(lead._id, 'Lead Note Deleted', { noteId }).catch(e => console.error(e));
+  // Removed Interakt tracking to prevent errors when user doesn't exist
+  // interaktService.trackEvent(lead._id, 'Lead Note Deleted', { noteId }).catch(e => console.error(e));
 
   res.json(new ApiResponse(httpStatus.OK, lead, 'Note deleted'));
 });
