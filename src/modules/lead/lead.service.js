@@ -261,6 +261,18 @@ export const distributeUnassignedLeads = async (adminId) => {
 export const getLeads = async (filter, options, userRole, userId, userDepartments = []) => {
   const query = { isDeleted: false };
 
+  if (filter.whatsappOnly === 'true' || filter.whatsappOnly === true) {
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { 'notes.direction': 'outbound' },
+        { 'notes.text': /\[Interakt Message\]|\[Attached Media/ },
+        { problem: /\[Interakt Message\]/ },
+        { source: 'social_media' }
+      ]
+    });
+  }
+
   // Sales can see all leads for shared statuses (interested, closed_lost, on_hold)
   const sharedStatuses = ['interested', 'closed_lost', 'on_hold'];
   const isSharedStatus = filter.status && sharedStatuses.includes(filter.status);
@@ -274,8 +286,9 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
 
   // Export mode: skip all status/pipeline filters, return everything
   const isExport = filter.export === 'true';
+  const isWhatsapp = filter.whatsappOnly === 'true' || filter.whatsappOnly === true;
 
-  if (!isExport) {
+  if (!isExport && !isWhatsapp) {
     if (!filter.cnp) query.cnp = { $ne: true };
 
     if (filter.status) {
@@ -289,7 +302,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   if (filter.cnp === 'true') query.cnp = true;
 
   // Always exclude leads that are in verification/shipment pipeline (unless fetching CNP list or exporting)
-  if (!filter.cnp && !isExport) {
+  if (!filter.cnp && !isExport && !isWhatsapp) {
     const isOnHold = filter.status === 'on_hold';
     const isInterested = filter.status === 'interested';
 
@@ -346,11 +359,13 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   const limit = parseInt(options.limit) || 20;
   const skip = (page - 1) * limit;
 
+  const sortCriteria = isWhatsapp ? { updatedAt: -1 } : { createdAt: -1 };
+
   const [leads, total] = await Promise.all([
     Lead.find(query)
       .populate('assignedTo', 'name email role')
       .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 })
+      .sort(sortCriteria)
       .skip(skip)
       .limit(limit),
     Lead.countDocuments(query),

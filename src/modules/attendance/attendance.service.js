@@ -18,14 +18,29 @@ const getTodayDate = () => {
 
 /**
  * Clock in for today.
+ * Supports re-check-in after a completed checkout on the same day.
  */
 const checkIn = async (userId, body = {}) => {
   const today = getTodayDate();
 
-  // Check if already checked in today
+  // Check if a record already exists for today
   const existing = await Attendance.findOne({ user: userId, date: today, isDeleted: false });
+
   if (existing) {
-    throw new ApiError(400, 'Already checked in today');
+    // If already checked in but NOT yet checked out → block
+    if (!existing.checkOut) {
+      throw new ApiError(400, 'Already checked in today');
+    }
+
+    // Checked out already — allow re-check-in: reset checkIn, clear checkOut & duration
+    const now = new Date();
+    existing.checkIn = now;
+    existing.checkOut = null;
+    existing.workingHours = 0;
+    existing.sessionDuration = '';
+    if (body.notes) existing.notes = body.notes;
+    await existing.save();
+    return existing;
   }
 
   // Determine status based on IST time
