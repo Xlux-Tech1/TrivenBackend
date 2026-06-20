@@ -26,6 +26,26 @@ router.get('/test-verifications', async (req, res) => {
   }
 });
 
+// Admin: remove fake debug leads created by old debug code
+router.post('/cleanup-debug-leads', auth('admin', 'manager'), async (req, res) => {
+  try {
+    const Lead = (await import('./lead.model.js')).default;
+    const Task = (await import('../task/task.model.js')).default;
+    const result = await Lead.updateMany(
+      { $or: [{ phone: '0000000000' }, { name: 'RAW WEBHOOK' }], isDeleted: false },
+      { isDeleted: true, deletedAt: new Date() }
+    );
+    // Also hide tasks for those leads
+    const fakeleads = await Lead.find({ $or: [{ phone: '0000000000' }, { name: 'RAW WEBHOOK' }] }, '_id').lean();
+    if (fakeleads.length > 0) {
+      await Task.updateMany({ lead: { $in: fakeleads.map(l => l._id) } }, { isDeleted: true });
+    }
+    res.json({ status: 200, message: `Cleaned up ${result.modifiedCount} debug leads` });
+  } catch (e) {
+    res.status(500).json({ status: 500, message: e.message });
+  }
+});
+
 router
   .route('/')
   .post(auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, validate(leadValidation.createLead), leadController.createLead)

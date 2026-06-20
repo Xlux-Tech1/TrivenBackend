@@ -130,7 +130,20 @@ export const getNextSalesUser = async (department = null) => {
 };
 
 export const createLead = async (data, createdBy, creatorRole, userDepartments = []) => {
-  const existingLead = await Lead.findOne({ phone: data.phone?.trim(), isDeleted: false });
+  // Normalize phone: strip +91/91 prefix, keep last 10 digits
+  if (data.phone) {
+    let p = data.phone.replace(/\s+/g, '').trim();
+    if (p.startsWith('+91')) p = p.substring(3);
+    else if (p.startsWith('91') && p.length === 12) p = p.substring(2);
+    else if (p.startsWith('+')) p = p.substring(1);
+    data.phone = p.slice(-10);
+  }
+
+  // Duplicate check using last-10-digits regex so +91XXXXXXXXXX and XXXXXXXXXX match the same lead
+  const last10 = data.phone?.slice(-10);
+  const existingLead = last10
+    ? await Lead.findOne({ phone: { $regex: last10 + '$' }, isDeleted: false })
+    : null;
   if (existingLead) throw new ApiError(httpStatus.CONFLICT, 'A lead with this phone number already exists');
 
   if (!data.assignedTo) {
@@ -185,27 +198,29 @@ export const createLead = async (data, createdBy, creatorRole, userDepartments =
 
   if (lead.assignedTo) {
 
-    // Auto-create a CALL task due in 2 hours for the assigned sales person
+    // Auto-create a CALL task — only if no active task already exists for this lead
     const assignedToId = lead.assignedTo._id ?? lead.assignedTo;
     if (assignedToId) {
-      const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
-      const taskCreatedBy = createdBy
-        ? new mongoose.Types.ObjectId(String(createdBy))
-        : assignedToId;
-      const task = await Task.create({
-        title: `Call ${lead.name}`,
-        description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
-        type: 'call',
-        lead: lead._id,
-        assignedTo: assignedToId,
-        createdBy: taskCreatedBy,
-        department: lead.department,
-        dueDate,
-        priority: 'high',
-        status: 'pending',
-        isDeleted: false,
-      });
-      // console.log('[AUTO-TASK] Created call task:', task._id, 'for user:', assignedToId);
+      const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+      if (!existingTask) {
+        const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        const taskCreatedBy = createdBy
+          ? new mongoose.Types.ObjectId(String(createdBy))
+          : assignedToId;
+        await Task.create({
+          title: `Call ${lead.name}`,
+          description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+          type: 'call',
+          lead: lead._id,
+          assignedTo: assignedToId,
+          createdBy: taskCreatedBy,
+          department: lead.department,
+          dueDate,
+          priority: 'high',
+          status: 'pending',
+          isDeleted: false,
+        });
+      }
     } else {
       console.warn('[AUTO-TASK] Skipped — no sales user available for lead:', lead._id);
     }
@@ -226,21 +241,24 @@ export const distributeUnassignedLeads = async (adminId) => {
       lead.assignedTo = assignedToId;
       await lead.save();
 
-      // Create a Call Task for the assigned user
+      // Create a Call Task only if no active task already exists for this lead
+      const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
       const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
-      const task = await Task.create({
-        title: `Call ${lead.name}`,
-        description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
-        type: 'call',
-        lead: lead._id,
-        assignedTo: assignedToId,
-        createdBy: adminId || assignedToId,
-        department: lead.department,
-        dueDate,
-        priority: 'high',
-        status: 'pending',
-        isDeleted: false,
-      });
+      const task = existingTask
+        ? existingTask
+        : await Task.create({
+          title: `Call ${lead.name}`,
+          description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+          type: 'call',
+          lead: lead._id,
+          assignedTo: assignedToId,
+          createdBy: adminId || assignedToId,
+          department: lead.department,
+          dueDate,
+          priority: 'high',
+          status: 'pending',
+          isDeleted: false,
+        });
 
       // Send notification
       await createNotification({
@@ -627,21 +645,24 @@ export const assignLead = async (leadId, assignedTo) => {
     relatedLead: lead._id,
   });
 
-  // Auto-create call task for newly assigned sales person
-  const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
-  await Task.create({
-    title: `Call ${lead.name}`,
-    description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
-    type: 'call',
-    lead: lead._id,
-    assignedTo,
-    createdBy: assignedTo,
-    department: lead.department,
-    dueDate,
-    priority: 'high',
-    status: 'pending',
-    isDeleted: false,
-  });
+  // Auto-create call task only if no active task already exists for this lead
+  const existingCallTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+  if (!existingCallTask) {
+    const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    await Task.create({
+      title: `Call ${lead.name}`,
+      description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+      type: 'call',
+      lead: lead._id,
+      assignedTo,
+      createdBy: assignedTo,
+      department: lead.department,
+      dueDate,
+      priority: 'high',
+      status: 'pending',
+      isDeleted: false,
+    });
+  }
 
   return lead;
 };

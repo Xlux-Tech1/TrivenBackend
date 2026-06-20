@@ -14,7 +14,7 @@ const notifyAdmins = async (data) => {
   await Promise.all(admins.map(a => createNotification({ ...data, user: a._id }).catch(() => {})));
 };
 
-const hiddenTaskStatuses = ['verification', 'cnp', 'cancel_call', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost'];
+const hiddenTaskStatuses = ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost'];
 const hiddenTaskLeadStatuses = ['closed_lost', 'on_hold', 'follow_up'];
 
 export const createTask = async (data, createdBy, creatorRole, userDepartments = []) => {

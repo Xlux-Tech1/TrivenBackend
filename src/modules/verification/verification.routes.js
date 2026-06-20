@@ -3,6 +3,7 @@ import auth from '../../middleware/auth.js';
 import requireCheckedIn from '../../middleware/requireCheckedIn.js';
 import departmentFilter from '../../middleware/departmentFilter.js';
 import Verification from './verification.model.js';
+import { sendDispatchNotification, sendVerificationConfirmation } from '../interakt/interakt.service.js';
 
 const router = express.Router();
 
@@ -154,6 +155,58 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
           })),
           { ordered: false }
         );
+
+        // Send WhatsApp confirmation to each new lead entering Verification
+        const Lead = (await import('../lead/lead.model.js')).default;
+        for (const task of newTasks) {
+          try {
+            let leadPhone = null;
+            let leadName = null;
+            let leadProblem = null;
+            let leadAddress = null;
+
+            if (task.lead) {
+              const leadDoc = await Lead.findById(task.lead)
+                .select('name phone problem address houseNo cityVillage postOffice district state pincode')
+                .lean();
+              if (leadDoc) {
+                leadPhone   = leadDoc.phone;
+                leadName    = leadDoc.name;
+                leadProblem = leadDoc.problem || '';
+                // Build full address from parts
+                const addrParts = [
+                  leadDoc.houseNo,
+                  leadDoc.cityVillage,
+                  leadDoc.postOffice,
+                  leadDoc.district,
+                  leadDoc.state,
+                  leadDoc.pincode,
+                ].filter(Boolean);
+                leadAddress = addrParts.length > 0 ? addrParts.join(', ') : (leadDoc.address || '');
+              }
+            }
+
+            // Also use task-level fields if lead fields are empty
+            const finalProblem = leadProblem || task.problem || '';
+            const finalPrice   = task.price || '';
+            const finalAddress = leadAddress || [
+              task.houseNo, task.cityVillage, task.postOffice,
+              task.district, task.state, task.pincode
+            ].filter(Boolean).join(', ') || '';
+
+            if (leadPhone) {
+              await sendVerificationConfirmation({
+                phone: leadPhone,
+                customerName: leadName || task.title,
+                problem: finalProblem,
+                price: finalPrice,
+                address: finalAddress,
+              });
+            }
+          } catch (waErr) {
+            console.error('[WhatsApp] Verification confirmation error for task', task._id, ':', waErr.message);
+          }
+        }
       } catch (err) {
         // Ignore duplicate key errors (11000) during bulk insert
         if (err.code !== 11000) console.error('Sync insert error:', err);
@@ -437,6 +490,22 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
         },
         { upsert: true, returnDocument: 'after' }
       );
+
+      // WhatsApp dispatch notification - smart sender (template + chat fallback)
+      try {
+        const customerPhone = record.lead?.phone;
+        const customerName = record.lead?.name || 'Customer';
+        if (customerPhone) {
+          await sendDispatchNotification({
+            phone: customerPhone,
+            customerName,
+            orderTitle: record.title,
+            price: record.price,
+          });
+        }
+      } catch (waErr) {
+        console.error('⚠️ WhatsApp dispatch notification error:', waErr.message);
+      }
     } else if (record.task && Object.keys(taskFields).length > 0) {
       await Task.findByIdAndUpdate(record.task, taskFields);
     }

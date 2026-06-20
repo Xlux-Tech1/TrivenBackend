@@ -178,7 +178,7 @@ export const sendRcsTemplate = async ({ countryCode = '+91', phoneNumber, templa
  * @param {string} templateName - Interakt pre-approved template name
  * @param {string} languageCode - Template language code
  */
-export const sendWhatsAppMessage = async ({ phone, messageText, templateName, languageCode = 'en' }) => {
+export const sendWhatsAppMessage = async ({ phone, messageText, bodyValues, templateName, languageCode = 'en' }) => {
   if (!INTERAKT_API_KEY) throw new Error('INTERAKT_API_KEY not configured');
   
   let cleanPhone = phone.trim();
@@ -195,6 +195,9 @@ export const sendWhatsAppMessage = async ({ phone, messageText, templateName, la
 
   const template = templateName || process.env.INTERAKT_WA_TEMPLATE || 'hello_world';
 
+  // Accept either a pre-built bodyValues array or a single messageText string
+  const finalBodyValues = Array.isArray(bodyValues) ? bodyValues : [messageText];
+
   const payload = {
     countryCode: `+${countryCode}`,
     phoneNumber: cleanPhone,
@@ -203,7 +206,7 @@ export const sendWhatsAppMessage = async ({ phone, messageText, templateName, la
     template: {
       name: template,
       languageCode,
-      bodyValues: [messageText],
+      bodyValues: finalBodyValues,
     },
   };
 
@@ -260,4 +263,126 @@ export const sendInteraktChatMessage = async ({ phone, messageText, mediaUrl }) 
 
   const response = await axios.post('https://api.interakt.ai/v1/public/message/', payload, { headers: getHeaders() });
   return response.data;
+};
+
+/**
+ * Fetch list of approved WhatsApp templates from Interakt
+ */
+export const getApprovedTemplates = async () => {
+  if (!INTERAKT_API_KEY) return [];
+  try {
+    const response = await axios.get('https://api.interakt.ai/v1/public/track/organization/templates', { headers: getHeaders() });
+    const templates = response.data?.results?.templates || [];
+    return templates.filter(t => t.status === 'APPROVED' || t.status === 'approved');
+  } catch (error) {
+    console.error('Interakt Get Templates Error:', error?.response?.data || error.message);
+    return [];
+  }
+};
+
+/**
+ * Smart WhatsApp dispatch sender - tries template first, falls back to chat message
+ * @param {string} phone - Customer phone number
+ * @param {string} customerName - Customer name
+ * @param {string} orderTitle - Order/booking title
+ * @param {string} price - Order price
+ */
+export const sendDispatchNotification = async ({ phone, customerName, orderTitle, price }) => {
+  if (!INTERAKT_API_KEY || !phone) return;
+
+  // Check if a specific dispatch template is configured in .env
+  const envTemplate = process.env.INTERAKT_DISPATCH_TEMPLATE;
+
+  if (envTemplate && envTemplate !== 'hello_world') {
+    // Use configured template directly
+    try {
+      const messageText = `${customerName} - आपकी बुकिंग verified हो गई है और जल्द ही dispatch होगी।`;
+      const result = await sendWhatsAppMessage({ phone, messageText, templateName: envTemplate, languageCode: 'en' });
+      console.log(`✅ WhatsApp dispatch message sent to ${phone} using template '${envTemplate}'`);
+      return result;
+    } catch (err) {
+      console.error(`⚠️ Template '${envTemplate}' failed:`, err?.response?.data || err.message);
+    }
+  }
+
+  // No env template configured - fetch approved templates dynamically
+  const approvedTemplates = await getApprovedTemplates();
+
+  if (approvedTemplates.length > 0) {
+    const template = approvedTemplates[0];
+    console.log(`[WhatsApp] Using approved template: '${template.name}'`);
+    try {
+      const messageText = `${customerName} - आपकी बुकिंग verified हो गई है और जल्द ही dispatch होगी।`;
+      const result = await sendWhatsAppMessage({ phone, messageText, templateName: template.name, languageCode: template.language || 'en' });
+      console.log(`✅ WhatsApp dispatch message sent to ${phone} using template '${template.name}'`);
+      return result;
+    } catch (err) {
+      console.error(`⚠️ Template message failed:`, err?.response?.data || err.message);
+    }
+  }
+
+  // No templates - try chat message (works only if customer messaged in 24hrs)
+  console.warn('⚠️ [WhatsApp] No approved templates found in Interakt account!');
+  try {
+    const chatMsg = `नमस्ते ${customerName} जी! 🎉 आपकी बुकिंग verified हो गई है और जल्द ही dispatch हो जाएगी। ऑर्डर: ${orderTitle || 'Order'}, कीमत: ₹${price || 'N/A'}। धन्यवाद! 🙏`;
+    const result = await sendInteraktChatMessage({ phone, messageText: chatMsg });
+    console.log(`✅ WhatsApp chat message sent to ${phone}`);
+    return result;
+  } catch (chatErr) {
+    const errMsg = chatErr?.response?.data?.message || chatErr.message;
+    if (errMsg?.includes('24 hours')) {
+      console.error('❌ [WhatsApp] FAILED: Customer not active in 24hrs AND no approved template exists.');
+      console.error('👉 FIX: Create a WhatsApp template on Interakt:');
+      console.error('   1. Go to https://app.interakt.ai → Templates → New Template');
+      console.error('   2. Body: "नमस्ते {{1}} जी! आपकी बुकिंग dispatch हो चुकी है।"');
+      console.error('   3. After approval, set INTERAKT_DISPATCH_TEMPLATE=<template_name> in .env');
+    } else {
+      console.error('❌ [WhatsApp] Failed:', errMsg);
+    }
+  }
+};
+
+
+/**
+ * Send a WhatsApp verification confirmation message to the lead
+ * Passes all lead details (problem, price, address, name) as template variables.
+ *
+ * booking_ template variable order:
+ *   {{1}} = problem  (e.g. "सिर दर्द एवं माइग्रेन")
+ *   {{2}} = price    (e.g. "1499")
+ *   {{3}} = address  (full delivery address)
+ *   {{4}} = name     (customer name)
+ */
+export const sendVerificationConfirmation = async ({
+  phone, customerName, problem, price, address, templateName
+}) => {
+  if (!INTERAKT_API_KEY || !phone) return;
+
+  const tmplName = templateName || process.env.INTERAKT_VERIFICATION_TEMPLATE || process.env.INTERAKT_WA_TEMPLATE || 'hello_world';
+  const tmplLang = process.env.INTERAKT_VERIFICATION_LANG || 'hi';
+
+  // Build the 4 bodyValues matching booking_ template placeholders
+  const bodyValues = [
+    problem  || 'उपचार',                    // {{1}} problem / treatment
+    String(price || ''),                     // {{2}} price
+    address  || '',                          // {{3}} delivery address
+    customerName || 'Customer',              // {{4}} customer name
+  ];
+
+  try {
+    const result = await sendWhatsAppMessage({ phone, bodyValues, templateName: tmplName, languageCode: tmplLang });
+    console.log(`[WhatsApp] Verification confirmation sent to ${phone} | problem=${problem} price=${price}`);
+    return result;
+  } catch (templateErr) {
+    console.warn(`[WhatsApp] Template failed for verification confirmation:`, templateErr?.response?.data || templateErr.message);
+    // Fallback: plain chat message (needs 24-hr active window)
+    try {
+      const fallbackMsg = `नमस्कार ${customerName || ''} जी! आपका Treatment Plan बुक हो गया है। समस्या: ${problem || ''}, मूल्य: ₹${price || ''}। पते पर: ${address || ''}। कृपया YES या NO में जवाब दें।`;
+      const result = await sendInteraktChatMessage({ phone, messageText: fallbackMsg });
+      console.log(`[WhatsApp] Verification confirmation (chat fallback) sent to ${phone}`);
+      return result;
+    } catch (chatErr) {
+      console.error(`[WhatsApp] Verification confirmation FAILED for ${phone}:`, chatErr?.response?.data || chatErr.message);
+    }
+  }
 };

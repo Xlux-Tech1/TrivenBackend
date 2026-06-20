@@ -13,18 +13,6 @@ import { sendWhatsAppMessage, sendInteraktChatMessage } from './interakt.service
  */
 const handleWebhook = catchAsync(async (req, res) => {
   const payload = req.body;
-  
-  // DEBUGGING: Log EVERYTHING to database as a lead
-  try {
-    const rawLeadData = {
-      name: `RAW WEBHOOK`,
-      phone: `0000000000`,
-      source: 'social_media',
-      problem: JSON.stringify(payload).substring(0, 500),
-      status: 'new'
-    };
-    await leadService.createLead(rawLeadData, null, 'admin');
-  } catch(e) {}
 
   console.log(`[Interakt Webhook] Received:`, JSON.stringify(payload, null, 2));
 
@@ -36,13 +24,12 @@ const handleWebhook = catchAsync(async (req, res) => {
     const isMessage = payload.entityType === 'USER_MESSAGE' || payload.type === 'message_received';
     
     if (isMessage) {
-      let phone, messageText, customerName, targetDepartment = 'migraine';
+      let phone, messageText, customerName, targetDepartment = null;
       
       if (payload.type === 'message_received' && payload.data) {
         phone = payload.data.customer?.phone_number || payload.data.customer?.phone;
         customerName = payload.data.customer?.traits?.name || `WhatsApp Lead (${phone})`;
         
-        // Try to extract text. If not found, stringify the message object so we can see what's inside
         const msgObj = payload.data.message;
         let extractedText = "";
         
@@ -54,22 +41,18 @@ const handleWebhook = catchAsync(async (req, res) => {
           extractedText = msgObj.text;
         }
 
-        // Check if there's a Facebook Ad referral
         let referralText = "";
         if (msgObj?.referral?.headline) {
           referralText = `\n[Clicked Ad: ${msgObj.referral.headline}]`;
         }
 
         messageText = extractedText ? (extractedText + referralText) : (msgObj ? JSON.stringify(msgObj) : "New message received");
-        // Extract business phone number to route to the correct department
+
         let businessPhone = payload.data?.customer?.channel_phone_number || "";
         
-        // Determine department based on business phone number
         const fallbackMigraine = "7309523829,917309523829,916376776399,6376776399";
         const migraineNumbers = (process.env.INTERAKT_MIGRAINE_NUMBERS || fallbackMigraine).split(",");
         const haircareNumbers = (process.env.INTERAKT_HAIRCARE_NUMBERS || "").split(",");
-        
-        targetDepartment = null; // Unassigned by default
         
         if (businessPhone && migraineNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
             targetDepartment = 'migraine';
@@ -83,30 +66,50 @@ const handleWebhook = catchAsync(async (req, res) => {
         messageText = payload.message?.text || payload.entity?.text || payload.entity?.suggestionResponse?.postBack?.data || "New message received";
       }
 
-      console.log(`User ${customerName} (${phone}) sent message: ${messageText} to department ${targetDepartment}`);
+      console.log(`[Interakt Webhook] User ${customerName} (${phone}) | dept: ${targetDepartment}`);
       
-      // Save this as a note to the corresponding Lead using the phone number
       if (phone && messageText) {
-        // Interakt sends phone numbers with + country code, e.g., +9193218...
-        if (phone.startsWith('+91')) phone = phone.substring(3);
-        else if (phone.startsWith('+')) phone = phone.substring(1);
+        // Normalize phone — strip +91 / 91 country code prefix, keep last 10 digits
+        let normalizedPhone = phone.replace(/\s+/g, '');
+        if (normalizedPhone.startsWith('+91')) normalizedPhone = normalizedPhone.substring(3);
+        else if (normalizedPhone.startsWith('91') && normalizedPhone.length === 12) normalizedPhone = normalizedPhone.substring(2);
+        else if (normalizedPhone.startsWith('+')) normalizedPhone = normalizedPhone.substring(1);
+        normalizedPhone = normalizedPhone.slice(-10); // always use last 10 digits
 
-        let lead = await Lead.findOne({ phone: { $regex: phone.slice(-10) + '$' } });
+        // Search only active (non-deleted) leads — match last 10 digits
+        let lead = await Lead.findOne({
+          phone: { $regex: normalizedPhone + '$' },
+          isDeleted: false,
+        });
+
         const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }).select('_id').lean();
         
         if (!lead) {
-          // Auto-create a lead if it doesn't exist
-          console.log(`[Interakt Webhook] Auto-creating new lead for phone ${phone}`);
+          console.log(`[Interakt Webhook] Auto-creating new lead for phone ${normalizedPhone}`);
           const newLeadData = {
             name: customerName,
-            phone: phone,
+            phone: normalizedPhone,
             source: 'social_media',
             department: targetDepartment,
             problem: `[Interakt Message] ${messageText}`,
             status: 'new'
           };
           
-          await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+          try {
+            await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+          } catch (createErr) {
+            // If duplicate phone conflict — find that lead and add a note instead
+            if (createErr.statusCode === 409 || createErr.message?.includes('already exists')) {
+              console.log(`[Interakt Webhook] Lead already exists (race condition) — adding note instead`);
+              lead = await Lead.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: false });
+              if (lead) {
+                lead.notes.push({ text: `[Interakt Message] ${messageText}`, direction: 'inbound' });
+                await lead.save();
+              }
+            } else {
+              throw createErr;
+            }
+          }
         } else {
           console.log(`[Interakt Webhook] Adding note to existing lead ${lead._id}`);
           lead.notes.push({
