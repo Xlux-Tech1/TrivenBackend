@@ -18,6 +18,86 @@ const notifyAdmins = async (data) => {
 const hiddenTaskStatuses = ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost'];
 const hiddenTaskLeadStatuses = ['closed_lost', 'on_hold', 'follow_up'];
 
+const handleVerificationSync = async (task, userId) => {
+  const record = {
+    task: task._id,
+    title: task.title,
+    assignedTo: task.assignedTo?._id || task.assignedTo,
+    department: task.department,
+    changedBy: userId,
+    lead: task.lead?._id || task.lead,
+    dueDate: task.dueDate,
+    description: task.description,
+    problem: task.problem,
+    age: task.age,
+    weight: task.weight,
+    height: task.height,
+    otherProblems: task.otherProblems,
+    problemDuration: task.problemDuration,
+    price: task.price,
+    cityVillageType: task.cityVillageType,
+    cityVillage: task.cityVillage,
+    houseNo: task.houseNo,
+    postOffice: task.postOffice,
+    district: task.district,
+    landmark: task.landmark,
+    pincode: task.pincode,
+    state: task.state,
+    reminderAt: task.reminderAt,
+    notes: task.notes,
+  };
+  const existing = await Verification.findOne({ task: task._id }, '_id');
+  await Verification.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
+  await Cnp.deleteOne({ task: task._id });
+  await ReadyToShipment.deleteOne({ task: task._id });
+
+  if (!existing) {
+    try {
+      let leadDoc = null;
+      if (task.lead && typeof task.lead === 'object' && task.lead._id) {
+          leadDoc = await Lead.findById(task.lead._id).lean();
+      } else if (task.lead) {
+          leadDoc = await Lead.findById(task.lead).lean();
+      }
+
+      let leadPhone = null;
+      let leadName = null;
+      let leadProblem = null;
+      let leadAddress = null;
+
+      if (leadDoc) {
+        leadPhone = leadDoc.phone;
+        leadName = leadDoc.name;
+        leadProblem = leadDoc.problem || '';
+        const addrParts = [
+          leadDoc.houseNo, leadDoc.cityVillage, leadDoc.postOffice,
+          leadDoc.district, leadDoc.state, leadDoc.pincode,
+        ].filter(Boolean);
+        leadAddress = addrParts.length > 0 ? addrParts.join(', ') : (leadDoc.address || '');
+      }
+
+      const finalProblem = leadProblem || task.problem || '';
+      const finalPrice = task.price || '';
+      const finalAddress = leadAddress || [
+        task.houseNo, task.cityVillage, task.postOffice,
+        task.district, task.state, task.pincode
+      ].filter(Boolean).join(', ') || '';
+
+      if (leadPhone) {
+        await sendVerificationConfirmation({
+          phone: leadPhone,
+          customerName: leadName || task.title,
+          problem: finalProblem,
+          price: finalPrice,
+          address: finalAddress,
+        });
+      }
+    } catch (err) {
+      console.error('[WhatsApp] Verification confirmation error for task', task._id, ':', err.message);
+    }
+  }
+};
+
 export const createTask = async (data, createdBy, creatorRole, userDepartments = []) => {
   // inherit department from lead if provided
   if (data.lead) {
@@ -40,6 +120,10 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
   }
 
   const task = await Task.create({ ...data, createdBy });
+  if (task.status === 'verification') {
+    await handleVerificationSync(task, createdBy);
+  }
+  
   await createNotification({
     user: task.assignedTo,
     title: 'New Task Assigned',
@@ -150,56 +234,7 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     await ReadyToShipment.deleteOne({ task: task._id });
     if (task.lead) await Lead.findByIdAndUpdate(task.lead, { cnp: true }).catch(() => {});
   } else if (data.status === 'verification') {
-    const existing = await Verification.findOne({ task: task._id }, '_id');
-    await Verification.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
-    await Cnp.deleteOne({ task: task._id });
-    await ReadyToShipment.deleteOne({ task: task._id });
-
-    if (!existing) {
-      try {
-        let leadDoc = null;
-        if (task.lead && typeof task.lead === 'object' && task.lead._id) {
-            leadDoc = await Lead.findById(task.lead._id).lean();
-        } else if (task.lead) {
-            leadDoc = await Lead.findById(task.lead).lean();
-        }
-
-        let leadPhone = null;
-        let leadName = null;
-        let leadProblem = null;
-        let leadAddress = null;
-
-        if (leadDoc) {
-          leadPhone = leadDoc.phone;
-          leadName = leadDoc.name;
-          leadProblem = leadDoc.problem || '';
-          const addrParts = [
-            leadDoc.houseNo, leadDoc.cityVillage, leadDoc.postOffice,
-            leadDoc.district, leadDoc.state, leadDoc.pincode,
-          ].filter(Boolean);
-          leadAddress = addrParts.length > 0 ? addrParts.join(', ') : (leadDoc.address || '');
-        }
-
-        const finalProblem = leadProblem || task.problem || '';
-        const finalPrice = task.price || '';
-        const finalAddress = leadAddress || [
-          task.houseNo, task.cityVillage, task.postOffice,
-          task.district, task.state, task.pincode
-        ].filter(Boolean).join(', ') || '';
-
-        if (leadPhone) {
-          await sendVerificationConfirmation({
-            phone: leadPhone,
-            customerName: leadName || task.title,
-            problem: finalProblem,
-            price: finalPrice,
-            address: finalAddress,
-          });
-        }
-      } catch (err) {
-        console.error('[WhatsApp] Verification confirmation error for task', task._id, ':', err.message);
-      }
-    }
+    await handleVerificationSync(task, userId);
   } else if (data.status === 'ready_to_shipment') {
     await ReadyToShipment.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
     await Verification.deleteOne({ task: task._id });
