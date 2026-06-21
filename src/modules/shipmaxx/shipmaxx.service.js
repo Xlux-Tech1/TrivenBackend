@@ -105,6 +105,10 @@ export const fetchAllOrders = (params)   => get('/orders', params);
 // ── Shipping ──────────────────────────────────────────────────────────────────
 export const createShipment = (body) => post('/shipping/create-shipment', body);
 export const trackShipment  = (awb)  => get('/shipping/track-shipment', { awb });
+export const cancelShipment = (body) => post('/shipping/cancel-shipment', body);
+export const checkServiceability = (body) => post('/shipping/serviceability', body);
+export const getShipments = (params) => get('/shipping/shipments', params);
+export const getShipmentById = (shipment_id) => get(`/shipping/shipments/${shipment_id}`);
 
 // generateLabel: try POST with order_id first (more reliable), fall back to GET with awb
 export const generateLabel = async (awbOrOrderId) => {
@@ -114,7 +118,7 @@ export const generateLabel = async (awbOrOrderId) => {
   } catch (e1) {
     // Fall back to GET with awb query param
     try {
-      return await get('/shipping/generate-label', { awb: awbOrOrderId });
+      return await get('/shipping/download-label', { awb: awbOrOrderId });
     } catch (e2) {
       // Try GET with order_id query param
       try {
@@ -140,12 +144,24 @@ export const getManifest = async (awbOrOrderId) => {
   }
 };
 
+// ── Warehouses ────────────────────────────────────────────────────────────────
+export const getWarehouses = (params) => get('/warehouses', params);
+export const createWarehouse = (body) => post('/warehouses/create', body);
+
+// ── NDR ───────────────────────────────────────────────────────────────────────
+export const getNdrList = (params) => get('/ndr', params);
+export const ndrAction = (ndr_id, body) => post(`/ndr/${ndr_id}/action`, body);
+export const ndrBulkAction = (body) => post('/ndr/bulk-action', body);
+
 // ── Invoice ───────────────────────────────────────────────────────────────────
-export const getInvoice = (order_id) => get(`/invoice/${order_id}`);
+export const getInvoice = (order_id) => get(`/invoice/order/${order_id}`);
 
 export default {
   login, setCredentials, setApiKey, setAuthUrl,
   getOrder, createOrder, updateOrder, fetchAllOrders,
   createShipment, trackShipment, generateLabel, getManifest,
+  cancelShipment, checkServiceability, getShipments, getShipmentById,
+  getWarehouses, createWarehouse,
+  getNdrList, ndrAction, ndrBulkAction,
   getInvoice,
 };

@@ -47,9 +47,22 @@ router.get('/shipping/track-shipment/:awb', auth(), c.trackShipment);
 router.get('/shipping/generate-label', auth(), c.generateLabel);
 router.get('/shipping/generate-label/:awb', auth(), c.generateLabel);
 router.get('/shipping/manifest/:awb', auth(), c.getManifest);
+router.post('/shipping/cancel-shipment', auth(), c.cancelShipment);
+router.post('/shipping/serviceability', auth(), c.checkServiceability);
+router.get('/shipping/shipments', auth(), c.getShipments);
+router.get('/shipping/shipments/:shipment_id', auth(), c.getShipmentById);
+
+// ── Warehouses ────────────────────────────────────────────────────────────────
+router.get('/warehouses', auth(), c.getWarehouses);
+router.post('/warehouses/create', auth(), c.createWarehouse);
 
 // ── Invoice ───────────────────────────────────────────────────────────────────
 router.get('/invoice/:order_id', auth(), c.getInvoice);
+
+// ── NDR ───────────────────────────────────────────────────────────────────────
+router.get('/ndr', auth(), c.getNdrList);
+router.post('/ndr/bulk-action', auth(), c.ndrBulkAction);
+router.post('/ndr/:ndr_id/action', auth(), c.ndrAction);
 
 // ── NDR Notes ─────────────────────────────────────────────────────────────────
 router.get('/ndr/notes', auth(), c.getNdrNotes);

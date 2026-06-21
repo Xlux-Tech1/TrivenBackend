@@ -178,6 +178,43 @@ export const trackShipment = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, data, 'Tracking info fetched'));
 });
 
+export const cancelShipment = catchAsync(async (req, res) => {
+  const { awb, cancellation_reason } = req.body;
+  if (!awb) return res.json(new ApiResponse(400, null, 'awb is required'));
+  const data = await smx.cancelShipment(req.body);
+  
+  try {
+    await Order.findOneAndUpdate(
+      { platform: 'shipmaxx', awb_code: awb },
+      { $set: { status: 'CANCELLED', status_updated_at: new Date() } }
+    );
+  } catch (err) {
+    console.error('[ShipMaxx Cancel Shipment Log Error]', err.message);
+  }
+  
+  res.json(new ApiResponse(200, data, 'Shipment cancelled'));
+});
+
+export const checkServiceability = catchAsync(async (req, res) => {
+  const { source_pincode, destination_pincode, weight_kg } = req.body;
+  if (!source_pincode || !destination_pincode || !weight_kg) 
+    return res.json(new ApiResponse(400, null, 'source_pincode, destination_pincode, weight_kg are required'));
+  const data = await smx.checkServiceability(req.body);
+  res.json(new ApiResponse(200, data, 'Serviceability fetched'));
+});
+
+export const getShipments = catchAsync(async (req, res) => {
+  const data = await smx.getShipments(req.query);
+  res.json(new ApiResponse(200, data, 'Shipments fetched'));
+});
+
+export const getShipmentById = catchAsync(async (req, res) => {
+  const { shipment_id } = req.params;
+  if (!shipment_id) return res.json(new ApiResponse(400, null, 'shipment_id is required'));
+  const data = await smx.getShipmentById(shipment_id);
+  res.json(new ApiResponse(200, data, 'Shipment fetched'));
+});
+
 export const generateLabel = async (req, res, next) => {
   try {
     const awb = req.params.awb || req.query.awb;
@@ -240,6 +277,20 @@ export const getManifest = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Warehouses ────────────────────────────────────────────────────────────────
+export const getWarehouses = catchAsync(async (req, res) => {
+  const data = await smx.getWarehouses(req.query);
+  res.json(new ApiResponse(200, data, 'Warehouses fetched'));
+});
+
+export const createWarehouse = catchAsync(async (req, res) => {
+  const { name, address, city, state, pincode } = req.body;
+  if (!name || !address || !city || !state || !pincode)
+    return res.json(new ApiResponse(400, null, 'name, address, city, state, pincode are required'));
+  const data = await smx.createWarehouse(req.body);
+  res.json(new ApiResponse(200, data, 'Warehouse created'));
+});
+
 // ── Invoice ───────────────────────────────────────────────────────────────────
 export const getInvoice = catchAsync(async (req, res) => {
   const { order_id } = req.params;
@@ -267,6 +318,27 @@ export const getNdrNotes = catchAsync(async (req, res) => {
   }
   const notes = await NdrNote.find(match).sort({ createdAt: -1 }).populate('createdBy', 'name role').lean();
   res.json(new ApiResponse(200, notes, 'ShipMaxx NDR notes fetched'));
+});
+
+export const getNdrList = catchAsync(async (req, res) => {
+  const data = await smx.getNdrList(req.query);
+  res.json(new ApiResponse(200, data, 'NDR list fetched'));
+});
+
+export const ndrAction = catchAsync(async (req, res) => {
+  const { ndr_id } = req.params;
+  const { action } = req.body;
+  if (!ndr_id || !action) return res.json(new ApiResponse(400, null, 'ndr_id and action are required'));
+  const data = await smx.ndrAction(ndr_id, req.body);
+  res.json(new ApiResponse(200, data, 'NDR action performed'));
+});
+
+export const ndrBulkAction = catchAsync(async (req, res) => {
+  const { ndr_ids, action } = req.body;
+  if (!ndr_ids || !Array.isArray(ndr_ids) || !action) 
+    return res.json(new ApiResponse(400, null, 'ndr_ids (array) and action are required'));
+  const data = await smx.ndrBulkAction(req.body);
+  res.json(new ApiResponse(200, data, 'NDR bulk action performed'));
 });
 
 export const createNdrNote = catchAsync(async (req, res) => {

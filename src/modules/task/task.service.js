@@ -8,6 +8,7 @@ import Cnp from '../cnp/cnp.model.js';
 import Verification from '../verification/verification.model.js';
 import ReadyToShipment from '../readytoshipment/readytoshipment.model.js';
 import User from '../user/user.model.js';
+import { sendVerificationConfirmation } from '../interakt/interakt.service.js';
 
 const notifyAdmins = async (data) => {
   const admins = await User.find({ role: { $in: ['admin', 'manager'] }, isDeleted: false }, '_id');
@@ -149,9 +150,56 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     await ReadyToShipment.deleteOne({ task: task._id });
     if (task.lead) await Lead.findByIdAndUpdate(task.lead, { cnp: true }).catch(() => {});
   } else if (data.status === 'verification') {
+    const existing = await Verification.findOne({ task: task._id }, '_id');
     await Verification.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
     await Cnp.deleteOne({ task: task._id });
     await ReadyToShipment.deleteOne({ task: task._id });
+
+    if (!existing) {
+      try {
+        let leadDoc = null;
+        if (task.lead && typeof task.lead === 'object' && task.lead._id) {
+            leadDoc = await Lead.findById(task.lead._id).lean();
+        } else if (task.lead) {
+            leadDoc = await Lead.findById(task.lead).lean();
+        }
+
+        let leadPhone = null;
+        let leadName = null;
+        let leadProblem = null;
+        let leadAddress = null;
+
+        if (leadDoc) {
+          leadPhone = leadDoc.phone;
+          leadName = leadDoc.name;
+          leadProblem = leadDoc.problem || '';
+          const addrParts = [
+            leadDoc.houseNo, leadDoc.cityVillage, leadDoc.postOffice,
+            leadDoc.district, leadDoc.state, leadDoc.pincode,
+          ].filter(Boolean);
+          leadAddress = addrParts.length > 0 ? addrParts.join(', ') : (leadDoc.address || '');
+        }
+
+        const finalProblem = leadProblem || task.problem || '';
+        const finalPrice = task.price || '';
+        const finalAddress = leadAddress || [
+          task.houseNo, task.cityVillage, task.postOffice,
+          task.district, task.state, task.pincode
+        ].filter(Boolean).join(', ') || '';
+
+        if (leadPhone) {
+          await sendVerificationConfirmation({
+            phone: leadPhone,
+            customerName: leadName || task.title,
+            problem: finalProblem,
+            price: finalPrice,
+            address: finalAddress,
+          });
+        }
+      } catch (err) {
+        console.error('[WhatsApp] Verification confirmation error for task', task._id, ':', err.message);
+      }
+    }
   } else if (data.status === 'ready_to_shipment') {
     await ReadyToShipment.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
     await Verification.deleteOne({ task: task._id });
