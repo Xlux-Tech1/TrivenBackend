@@ -1,15 +1,17 @@
 import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import smx from './shipmaxx.service.js';
-import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
-import { Order } from '../shiprocket/models/order.model.js';
-import { Followup } from '../shiprocket/models/followup.model.js';
-import { DeliveredOrder } from '../shiprocket/models/deliveredOrder.model.js';
-import { InTransitOrder } from '../shiprocket/models/inTransitOrder.model.js';
+import { ShipmaxxNdrNote as NdrNote } from './models/shipmaxxNdrNote.model.js';
+import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
+import { ShipmaxxFollowup as Followup } from './models/shipmaxxFollowup.model.js';
+import { ShipmaxxDeliveredOrder as DeliveredOrder } from './models/shipmaxxDeliveredOrder.model.js';
+import { ShipmaxxInTransitOrder as InTransitOrder } from './models/shipmaxxInTransitOrder.model.js';
+import { ShipmaxxReadyToShipment as ReadyToShipment } from './models/shipmaxxReadyToShipment.model.js';
+import { ShipmaxxRtoOrder as RTOOrder } from './models/shipmaxxRtoOrder.model.js';
+import { ShipmaxxReturn as ShiprocketReturn } from './models/shipmaxxReturn.model.js';
 import { Lead } from '../lead/lead.model.js';
 import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
-import ReadyToShipment from '../readytoshipment/readytoshipment.model.js';
 import { getNextOrderId } from '../shiprocket/counter/counter.model.js';
 
 const DEFAULT_FOLLOWUP_TOTAL = 5;
@@ -32,6 +34,18 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
   });
   await Followup.bulkWrite(ops);
   await Order.findByIdAndUpdate(orderId, { auto_followups_set: true });
+};
+
+// Helper to safely parse ShipMaxx timestamps which might be in DD-MM-YYYY HH:mm:ss format
+const parseShipMaxxDate = (dateStr) => {
+  if (!dateStr) return new Date();
+  const parts = String(dateStr).trim().match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (parts) {
+    const [_, d, m, y, h, min, s] = parts;
+    // Construct local IST datetime
+    return new Date(`${y}-${m}-${d}T${h || '00'}:${min || '00'}:${s || '00'}+05:30`);
+  }
+  return new Date(dateStr);
 };
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -382,21 +396,26 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
-    match.$or = [{ createdAt: dateFilter }, { status_updated_at: dateFilter }];
+    match.status_updated_at = dateFilter;
   }
 
-  const [deliveredCountResult, statusBreakdown] = await Promise.all([
+  const [deliveredCountResult, statusBreakdown, revenueAggregation] = await Promise.all([
     Order.countDocuments({ status: /^delivered$/i, ...match }),
     Order.aggregate([
       { $match: match },
-      { $group: { _id: '$status', count: { $sum: 1 } } },
+      { $group: { _id: '$status', count: { $sum: 1 }, revenue: { $sum: '$sub_total' } } },
       { $sort: { count: -1 } }
     ]),
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
+    ])
   ]);
 
   const breakdown = statusBreakdown.map(item => ({
     _id: item._id || 'UNKNOWN',
     count: item.count,
+    revenue: item.revenue || 0,
   }));
 
   const delIdx = breakdown.findIndex(b => /^delivered$/i.test(b._id));
@@ -406,7 +425,9 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     breakdown[delIdx].count = deliveredCountResult;
   }
 
-  res.json(new ApiResponse(200, { count: deliveredCountResult, revenue: 0, statusBreakdown: breakdown }, 'Delivered stats'));
+  const totalRevenue = revenueAggregation?.[0]?.totalRevenue || 0;
+
+  res.json(new ApiResponse(200, { count: deliveredCountResult, revenue: totalRevenue, statusBreakdown: breakdown }, 'Delivered stats'));
 });
 
 export const getStatusOrders = catchAsync(async (req, res) => {
@@ -415,7 +436,24 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   const match = { platform: 'shipmaxx' };
   const statusVariant = status.replace(/[-_]/g, '[-_ ]');
-  if (/^undelivered$/i.test(status)) {
+  
+  const SMX_REVERSE_MAP = {
+    DELIVERED: ['DEL', 'DELIVERED'],
+    IN_TRANSIT: ['INT', 'IN_TRANSIT'],
+    UNDELIVERED: ['UND', 'UNDELIVERED'],
+    RTO_DELIVERED: ['RTO', 'RTO_DELIVERED'],
+    OUT_FOR_DELIVERY: ['OFD', 'OUT_FOR_DELIVERY'],
+    UNDELIVERED_ATTEMPT_FAILURE: ['DEX', 'UNDELIVERED_ATTEMPT_FAILURE'],
+    SHIPPED: ['SC', 'SHIPPED'],
+    CANCELED: ['PCN', 'CANCELED'],
+    REACHED_AT_DESTINATION_HUB: ['RRA', 'REACHED_AT_DESTINATION_HUB'],
+    PICKUP_SCHEDULED: ['SPD', 'PICKUP_SCHEDULED'],
+    NEW: ['SPB', 'NEW']
+  };
+
+  if (SMX_REVERSE_MAP[status]) {
+    match.status = { $in: SMX_REVERSE_MAP[status].map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
+  } else if (/^undelivered$/i.test(status)) {
     match.status = { $regex: /^undelivered/i };
   } else {
     match.status = new RegExp(`^${statusVariant}$`, 'i');
@@ -426,13 +464,13 @@ export const getStatusOrders = catchAsync(async (req, res) => {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
-    match.$or = [{ createdAt: dateFilter }, { status_updated_at: dateFilter }];
+    match.status_updated_at = dateFilter;
   }
 
   const orders = await Order.find(match)
     .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('comments.createdBy', 'name role')
-    .sort({ createdAt: -1 })
+    .sort({ status_updated_at: -1, createdAt: -1 })
     .limit(Math.min(Number(limit) || 50, 200)).lean();
 
   orders.forEach(o => {
@@ -578,23 +616,183 @@ export const importByIds = catchAsync(async (req, res) => {
 });
 
 export const syncShipmaxx = catchAsync(async (req, res) => {
+  let updatedCount = 0;
+  
+  // 1. Sync ALL recent shipments from ShipMaxx to catch historical or externally created orders
+  try {
+    let page = 1;
+    while (true) {
+      const shipRes = await smx.getShipments({ limit: 50, per_page: 50, page });
+      const shipments = shipRes?.data?.data || shipRes?.data || [];
+      if (shipments.length === 0) break;
+
+      for (const s of shipments) {
+        if (!s.awb && !s.order_id) continue;
+        const query = { platform: 'shipmaxx' };
+        if (s.order_id) query.order_id = String(s.order_id);
+        else query.awb_code = String(s.awb);
+
+        const updateData = {
+          order_id: String(s.order_id || s.awb),
+          awb_code: String(s.awb || ''),
+          status: s.status ? String(s.status).toUpperCase().replace(/[\s-]+/g, '_') : 'NEW',
+          platform: 'shipmaxx',
+          payment_method: s.payment_method || '',
+          status_updated_at: s.created_at ? new Date(s.created_at) : new Date(),
+        };
+        
+        if (s.products && Array.isArray(s.products)) {
+          updateData.order_items = s.products.map(p => ({
+            name: p.name,
+            sku: p.sku,
+            units: p.quantity,
+          }));
+        }
+        await Order.findOneAndUpdate(query, { $set: updateData }, { upsert: true }).catch(() => {});
+        updatedCount++;
+      }
+      
+      if (shipments.length < 15) break;
+      page++;
+      if (page > 50) break; // safety limit
+    }
+  } catch (err) {
+    console.error('[Sync ShipMaxx] Error fetching global shipments:', err.message);
+  }
+
+  // 1.5 Sync detailed order data (Revenue, Customer details)
+  try {
+    let orderPage = 1;
+    while (true) {
+      const ordersRes = await smx.fetchAllOrders({ limit: 50, per_page: 50, page: orderPage });
+      const orders = ordersRes?.data?.data || ordersRes?.data || ordersRes?.orders || [];
+      if (orders.length === 0) break;
+      
+      for (const o of orders) {
+        if (!o.order_id) continue;
+        
+        const updateData = {
+          platform: 'shipmaxx',
+          billing_customer_name: o.customer_name || '',
+          billing_phone: o.phone || '',
+          billing_address: o.address || '',
+          billing_pincode: o.billing_zip || o.shipping_zip || '',
+          sub_total: Number(o.total_price) || 0,
+        };
+        
+        if (o.awb) updateData.awb_code = String(o.awb);
+        
+        await Order.findOneAndUpdate(
+          { platform: 'shipmaxx', order_id: String(o.order_id) },
+          { $set: updateData },
+          { upsert: true }
+        ).catch(() => {});
+      }
+      
+      if (orders.length < 15) break;
+      orderPage++;
+      if (orderPage > 50) break; // safety limit
+    }
+  } catch (err) {
+    console.error('[Sync ShipMaxx] Error fetching detailed orders:', err.message);
+  }
+
+  // 2. Sync recent NDR list from ShipMaxx to ensure we catch precise NDR failure reasons
+  try {
+    const ndrRes = await smx.getNdrList({ limit: 1000, per_page: 1000, page: 1 });
+    const ndrs = ndrRes?.shipments || [];
+    for (const ndr of ndrs) {
+      if (!ndr.orderId && !ndr.awb) continue;
+      
+      let status = ndr.reason || 'UNDELIVERED';
+      const attemptNumber = Number(ndr.attemptNumber) || 1;
+      let mappedStatus = attemptNumber === 1 ? 'UNDELIVERED_1ST_ATTEMPT' :
+                         attemptNumber === 2 ? 'UNDELIVERED_2ND_ATTEMPT' :
+                         attemptNumber === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+      
+      const query = { platform: 'shipmaxx' };
+      if (ndr.orderId) query.order_id = String(ndr.orderId);
+      else query.awb_code = String(ndr.awb);
+
+      const updateData = {
+        order_id: String(ndr.orderId || ndr.awb),
+        awb_code: String(ndr.awb || ''),
+        status: mappedStatus,
+        delivery_attempt: attemptNumber,
+        status_updated_at: ndr.attemptDate ? parseShipMaxxDate(`${ndr.attemptDate} ${ndr.attemptTime || '00:00:00'}`) : new Date(),
+        platform: 'shipmaxx',
+      };
+      
+      if (ndr.customer) {
+        if (ndr.customer.name) updateData.billing_customer_name = ndr.customer.name;
+        if (ndr.customer.phone) updateData.billing_phone = ndr.customer.phone;
+        if (ndr.customer.city) updateData.billing_city = ndr.customer.city;
+        if (ndr.customer.state) updateData.billing_state = ndr.customer.state;
+      }
+      
+      await Order.findOneAndUpdate(query, { $set: updateData }, { upsert: true }).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[Sync ShipMaxx] Error fetching NDRs:', err.message);
+  }
+  // 3. Track active orders to ensure live statuses are completely up to date
   const activeOrders = await Order.find({
     platform: 'shipmaxx',
     awb_code: { $exists: true, $ne: '' },
-    status: { $not: /^(delivered|rto_delivered)/i }
+    status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i }
   }).lean();
 
-  let updatedCount = 0;
   for (const o of activeOrders) {
     try {
       const trackRes = await smx.trackShipment(o.awb_code);
       const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
       const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status;
       if (rawStatus) {
-        const status = rawStatus.toUpperCase();
+        let status = rawStatus.toUpperCase();
+        
+        const smxStatusMap = {
+          DEL: 'DELIVERED',
+          INT: 'IN_TRANSIT',
+          UND: 'UNDELIVERED',
+          RTO: 'RTO_DELIVERED',
+          OFD: 'OUT_FOR_DELIVERY',
+          DEX: 'UNDELIVERED_ATTEMPT_FAILURE',
+          SC:  'SHIPPED',
+          PCN: 'CANCELED',
+          RRA: 'RTO_INITIATED',
+          SPD: 'PICKUP_SCHEDULED',
+          SPB: 'NEW'
+        };
+        if (smxStatusMap[status]) {
+          status = smxStatusMap[status];
+        }
+
+        // If it's a known NDR status from ShipMaxx, map it to the standard attempt status
+        const ndrKeywords = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
+        if (ndrKeywords.some(k => status.includes(k)) && !status.startsWith('UNDELIVERED') && !status.includes('DELIVERED')) {
+           const attempt = o.delivery_attempt || 1;
+           status = attempt === 1 ? 'UNDELIVERED_1ST_ATTEMPT' :
+                    attempt === 2 ? 'UNDELIVERED_2ND_ATTEMPT' :
+                    attempt === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+        }
+        
         const update = { status, status_updated_at: new Date() };
+        
+        if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+          const latestEvent = tracking.history[0];
+          if (latestEvent && latestEvent.timestamp) {
+            update.status_updated_at = parseShipMaxxDate(latestEvent.timestamp);
+          }
+        }
+        
         if (status === 'DELIVERED') {
           update.delivered_at = new Date();
+          if (tracking.history && Array.isArray(tracking.history)) {
+            const delEvent = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered');
+            if (delEvent && delEvent.timestamp) {
+              update.delivered_at = parseShipMaxxDate(delEvent.timestamp);
+            }
+          }
           // Update lead status to follow_up
           if (o.lead_id) await Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => {});
         }

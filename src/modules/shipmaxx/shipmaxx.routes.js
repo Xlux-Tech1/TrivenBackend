@@ -6,6 +6,29 @@ const router = express.Router();
 
 // ── Debug ─────────────────────────────────────────────────────────────────────
 router.get('/debug/sync', auth(), c.debugSync);
+router.post('/debug-sync-force', c.syncShipmaxx);
+router.get('/debug-stats', c.getDeliveredStats);
+router.post('/debug-fix-dates', async (req, res) => {
+  try {
+    const { fixDates } = await import('../../../fix-delivered-dates.js');
+    const result = await fixDates();
+    res.json({ success: true, result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.get('/debug-count-25', async (req, res) => {
+  try {
+    const mongoose = (await import('mongoose')).default;
+    const db = mongoose.connection.db;
+    const orders = await db.collection('shipmaxxorders').find({ 
+      status: 'DELIVERED', 
+      delivered_at: { 
+        $gte: new Date('2026-06-25T00:00:00.000+05:30'),
+        $lte: new Date('2026-06-25T23:59:59.999+05:30')
+      } 
+    }).toArray();
+    res.json({ count: orders.length, orders: orders.map(o => ({ awb: o.awb_code, date: o.delivered_at })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 router.post('/auth/login', auth(), c.login);
@@ -59,15 +82,17 @@ router.post('/warehouses/create', auth(), c.createWarehouse);
 // ── Invoice ───────────────────────────────────────────────────────────────────
 router.get('/invoice/:order_id', auth(), c.getInvoice);
 
-// ── NDR ───────────────────────────────────────────────────────────────────────
-router.get('/ndr', auth(), c.getNdrList);
-router.post('/ndr/bulk-action', auth(), c.ndrBulkAction);
-router.post('/ndr/:ndr_id/action', auth(), c.ndrAction);
+// ── NDR (specific static routes BEFORE parameterized :ndr_id) ────────────────
+router.get('/ndr',                auth(), c.getNdrList);
+router.post('/ndr/bulk-action',   auth(), c.ndrBulkAction);
 
-// ── NDR Notes ─────────────────────────────────────────────────────────────────
-router.get('/ndr/notes', auth(), c.getNdrNotes);
-router.post('/ndr/notes', auth(), c.createNdrNote);
-router.put('/ndr/notes/:id', auth(), c.updateNdrNote);
-router.delete('/ndr/notes/:id', auth(), c.deleteNdrNote);
+// ── NDR Notes (must be before /:ndr_id to avoid collision) ───────────────────
+router.get('/ndr/notes',          auth(), c.getNdrNotes);
+router.post('/ndr/notes',         auth(), c.createNdrNote);
+router.put('/ndr/notes/:id',      auth(), c.updateNdrNote);
+router.delete('/ndr/notes/:id',   auth(), c.deleteNdrNote);
+
+// ── NDR parameterized action (comes last) ─────────────────────────────────────
+router.post('/ndr/:ndr_id/action', auth(), c.ndrAction);
 
 export default router;
